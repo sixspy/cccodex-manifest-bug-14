@@ -89,5 +89,21 @@ th { color: var(--muted); font-weight: 500; }
   color: var(--accent);
   font-size: 0.75rem;
 }
+.chip {
+  display: inline-block;
+  padding: 0.15rem 0.45rem;
+  border: 1px dashed var(--muted);
+  color: var(--muted);
+  font-size: 0.75rem;
+  margin-left: 0.35rem;
+}
+.chip.warn {
+  border: 1px solid var(--danger);
+  color: var(--danger);
+}
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
 .muted { color: var(--muted); }
 .panel { margin-top: 1rem; padding-top: 0.5rem; border-top: 1px dashed var(--line); }

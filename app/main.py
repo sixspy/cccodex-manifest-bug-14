@@ -12,13 +12,15 @@ from app.db import init_db
 from app.services import (
     close_batch,
     get_batch,
+    inventory_proof,
+    list_adjudications,
     list_batches,
     list_objects,
     list_reports,
     register_object,
     run_visibility,
 )
-from app.services.objects import ServiceError
+from app.services.errors import ServiceError
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = ROOT / "static"
@@ -120,13 +122,32 @@ async def api_batches(request: Request, status: str | None = None) -> dict:
     return {"items": list_batches(status=status)}
 
 
+def _error_response(exc: ServiceError) -> Response:
+    payload = {"ok": False, "error": exc.message}
+    adjudication = getattr(exc, "adjudication", None)
+    if adjudication:
+        payload["adjudication"] = adjudication
+    db_status = getattr(exc, "db_status", None)
+    if db_status:
+        payload["db_status"] = db_status
+    return Response(
+        content=payload,
+        status_code=exc.status_code,
+        media_type="application/json",
+    )
+
+
 @get("/api/batches/{batch_id:int}")
 async def api_batch_detail(request: Request, batch_id: int) -> dict:
     require_user(request)
     batch = get_batch(batch_id)
     if not batch:
         raise HTTPException(status_code=404, detail="批次不存在")
-    return {"batch": batch, "objects": list_objects(batch_id)}
+    return {
+        "batch": batch,
+        "objects": list_objects(batch_id),
+        "proof": inventory_proof(batch_id),
+    }
 
 
 @post("/api/batches/{batch_id:int}/objects")
@@ -134,20 +155,21 @@ async def api_register(request: Request, batch_id: int) -> Response:
     require_user(request)
     body = await request.json()
     try:
-        obj = register_object(
+        result = register_object(
             batch_id,
             str(body.get("object_key", "")),
             str(body.get("content_hash", "")),
             int(body.get("byte_size", 0)),
+            expected_status=body.get("expected_status"),
         )
     except ServiceError as exc:
-        return Response(
-            content={"ok": False, "error": exc.message},
-            status_code=exc.status_code,
-            media_type="application/json",
-        )
+        return _error_response(exc)
     return Response(
-        content={"ok": True, "object": obj},
+        content={
+            "ok": True,
+            "object": result["object"],
+            "adjudication": result["adjudication"],
+        },
         status_code=200,
         media_type="application/json",
     )
@@ -157,18 +179,28 @@ async def api_register(request: Request, batch_id: int) -> Response:
 async def api_close(request: Request, batch_id: int) -> Response:
     require_user(request)
     try:
-        run = close_batch(batch_id)
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        result = close_batch(batch_id, expected_status=body.get("expected_status"))
     except ServiceError as exc:
-        return Response(
-            content={"ok": False, "error": exc.message},
-            status_code=exc.status_code,
-            media_type="application/json",
-        )
+        return _error_response(exc)
     return Response(
-        content={"ok": True, "run": run},
+        content={
+            "ok": True,
+            "run": result["run"],
+            "adjudication": result["adjudication"],
+        },
         status_code=200,
         media_type="application/json",
     )
+
+
+@get("/api/adjudications")
+async def api_adjudications(request: Request) -> dict:
+    require_user(request)
+    return {"items": list_adjudications()}
 
 
 @get("/api/visibility-reports")
@@ -203,6 +235,7 @@ app = Litestar(
         api_close,
         api_reports,
         api_run_report,
+        api_adjudications,
         create_static_files_router(path="/static", directories=[str(STATIC)]),
     ],
     on_startup=[_on_startup],

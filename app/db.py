@@ -5,10 +5,15 @@ from pathlib import Path
 from app.config import Config
 
 
-def connect(db_path: str | None = None) -> sqlite3.Connection:
+def connect(db_path: str | None = None, *, autocommit: bool = False) -> sqlite3.Connection:
     path = db_path or Config.database()
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, check_same_thread=False)
+    conn = sqlite3.connect(
+        path,
+        check_same_thread=False,
+        isolation_level=None if autocommit else "",
+        timeout=10.0,
+    )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
@@ -22,6 +27,25 @@ def get_db(db_path: str | None = None):
         conn.commit()
     except Exception:
         conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+@contextmanager
+def write_db(db_path: str | None = None):
+    """排他写事务：BEGIN IMMEDIATE 立即取写锁，两侧席位抢着写时串行化，
+    杜绝“检查-再写”之间被夹入导致的双写分裂态。"""
+    conn = connect(db_path, autocommit=True)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        yield conn
+        conn.execute("COMMIT")
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
         raise
     finally:
         conn.close()
@@ -71,6 +95,51 @@ CREATE TABLE IF NOT EXISTS visibility_reports (
   mismatch_count INTEGER NOT NULL,
   summary TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS adjudications (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  batch_id INTEGER NOT NULL,
+  operation TEXT NOT NULL,
+  page_status TEXT NOT NULL,
+  db_status TEXT NOT NULL,
+  decision TEXT NOT NULL CHECK (decision IN ('回滚','强制刷')),
+  detail TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY(batch_id) REFERENCES landing_batches(id)
+);
+
+CREATE TABLE IF NOT EXISTS rollback_ledger (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  adjudication_id INTEGER NOT NULL UNIQUE,
+  batch_id INTEGER NOT NULL,
+  operation TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY(adjudication_id) REFERENCES adjudications(id)
+);
+
+CREATE TABLE IF NOT EXISTS force_refresh_vouchers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  adjudication_id INTEGER NOT NULL UNIQUE,
+  batch_id INTEGER NOT NULL,
+  operation TEXT NOT NULL,
+  refreshed_status TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY(adjudication_id) REFERENCES adjudications(id)
+);
+
+CREATE TABLE IF NOT EXISTS drift_repros (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  adjudication_id INTEGER NOT NULL,
+  batch_id INTEGER NOT NULL,
+  operation TEXT NOT NULL,
+  page_status TEXT NOT NULL,
+  db_status TEXT NOT NULL,
+  snapshot TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY(adjudication_id) REFERENCES adjudications(id)
 );
 
 CREATE TABLE IF NOT EXISTS meta (
